@@ -1,19 +1,23 @@
+import glob
+import imp
+import shutil
+import time
+
 import dash
 import dash_core_components as dcc
 import dash_html_components as html
-from dash.dependencies import Input, Output
-import plotly.graph_objects as go
-import time
-import shutil
-import imp
-import scipy.stats
+import h5py
+import matplotlib.gridspec as gs
 import numpy as np
-from pyodesys.symbolic import SymbolicSys
-from pyodesys.native import native_sys
-from scipy.stats import gaussian_kde
 import pathos.multiprocessing as mp
-from smt.sampling_methods import LHS
+import plotly.graph_objects as go
 import scipy.stats
+from dash.dependencies import Input, Output
+from pyodesys.native import native_sys
+from pyodesys.symbolic import SymbolicSys
+from scipy.spatial import Delaunay
+from scipy.stats import gaussian_kde
+from smt.sampling_methods import LHS
 
 #import utils.blackbox_git as bb
 jmax=150 #changing this requires full recompilation and symbolic derivatives.
@@ -57,10 +61,6 @@ def install():
     print("Computing analytical derivatives ...")
     neq_coop_tr = SymbolicSys.from_callback(neq_coop_rhs_transient, ny=jmax+2, nparams=8, backend="sympysymengine")
     neq_coop = SymbolicSys.from_callback(neq_coop_rhs, ny=jmax+1, nparams=8, backend="sympysymengine")
-    #neq2_isodesic = SymbolicSys.from_callback(neq2_isodesic_rhs, ny=jmax + 1, nparams=6, backend="sympysymengine")
-    #neq_isodesic = SymbolicSys.from_callback(neq_isodesic_rhs, ny=jmax + 1, nparams=4, backend="sympysymengine")
-    #eq_isodesic = SymbolicSys.from_callback(eq_isodesic_rhs, ny=jmax, nparams=2, backend="sympysymengine")
-    #eq_coop = SymbolicSys.from_callback(eq_coop_rhs, ny=jmax, nparams=4, backend="sympysymengine")
 
     print("Trying to compile ...")
 
@@ -75,39 +75,11 @@ def install():
     ic[0] = m0
     neq_coop_compiled.integrate(np.linspace(0, tmax, 1000), ic, params=(nc, ec, ka, kd1,kd2,kd3,e,kp), integrator="cvode")
 
-    #eq_coop_compiled= native_sys['cvode'].from_other(eq_coop)
-    ic = np.zeros(jmax)
-    ic[0] = m0
-    #eq_coop_compiled.integrate(np.linspace(0, tmax, 1000), ic, params=(nc,e,ec,kp), integrator="cvode")
-
-    #neq2_isodesic_compiled = native_sys['cvode'].from_other(neq2_isodesic)
-    ic = np.zeros(jmax + 1)
-    ic[0] = m0
-    #neq2_isodesic_compiled.integrate(np.linspace(0, tmax, 1000), ic, params=(kp, kn, ka, kd1,kd2,kd3), integrator="cvode")
-
-    #neq_isodesic_compiled = native_sys['cvode'].from_other(neq_isodesic)
-    ic = np.zeros(jmax + 1)
-    ic[0] = m0
-    #neq_isodesic_compiled.integrate(np.linspace(0, tmax, 1000), ic, params=(kp, kn, ka, kd), integrator="cvode")
-
-    #eq_isodesic_compiled = native_sys['cvode'].from_other(eq_isodesic)
-    ic = np.zeros(jmax)
-    ic[0] = m0
-    #eq_isodesic_compiled.integrate(np.linspace(0, tmax, 1000), ic, params=(kp, kn), integrator="cvode")
     print("Compilation successful, saving systems!")
     shutil.copytree(neq_coop_tr_compiled._native.mod._binary_path.rpartition("/")[0],
                     "compiled/{}/neq_coop_tr".format(jmax) + "/mod")
     shutil.copytree(neq_coop_compiled._native.mod._binary_path.rpartition("/")[0],
                     "compiled/{}/neq_coop".format(jmax) + "/mod")
-    """
-    shutil.copytree(eq_coop_compiled._native.mod._binary_path.rpartition("/")[0],
-                    "compiled/{}/eq_coop".format(jmax) + "/mod")
-    shutil.copytree(neq2_isodesic_compiled._native.mod._binary_path.rpartition("/")[0],
-                    "compiled/{}/neq2_isodesic".format(jmax) + "/mod")
-    shutil.copytree(neq_isodesic_compiled._native.mod._binary_path.rpartition("/")[0],
-                    "compiled/{}/neq_isodesic".format(jmax) + "/mod")
-    shutil.copytree(eq_isodesic_compiled._native.mod._binary_path.rpartition("/")[0],
-                    "compiled/{}/eq_isodesic".format(jmax) + "/mod")"""
 
 
 class results_wrapper():
@@ -117,8 +89,6 @@ class results_wrapper():
         self.stats=stats
     pass
 
-
-###
 class base_integration_wrapper():
     def __init__(self, name):
         import imp
@@ -160,89 +130,7 @@ class base_integration_wrapper():
         return results_wrapper(np.squeeze(tout), yout[0], stats)
 
 
-def eq_isodesic_rhs(t, C, p, backend=np):
-    kp = p[0]
-    kn = p[1]
 
-    dC = np.zeros_like(C) * C  ## 
-    for n in range(0, jmax):
-        dC[n] = -2 * kp * C[n] * sum(C) + kp * sum(C[:n] * (C[:n][::-1])) + 2 * kn * sum(C[n+1:]) - kn * (n) * C[n]
-
-    return dC
-def neq_isodesic_rhs(t, C, p, backend=np):
-    kp = p[0]
-    kn = p[1]
-    ka = p[2]
-    kd = p[3]
-
-    d = C[0]
-
-    dC = np.zeros_like(C) * C  ## 
-    idx = np.arange(jmax + 1)  # 
-
-    dC[0] = -ka * d + kd * sum(idx * C)  # one extra flop for the first element which is zero
-    dC[1] = ka * d - 2 * kp * C[1] * sum(C[1:]) + 2 * kn * sum(C[2:]) - kd * C[1] + 2 * kd * sum(C[2:])
-    for n in range(2, jmax + 1):
-        dC[n] = -2 * kp * C[n] * sum(C[1:]) + kp * sum(C[1:n] * (C[1:n][::-1])) + 2 * kn * sum(C[n + 1:])\
-                - kn * ( n - 1) * C[n] - n * kd * C[n] + 2 * kd * sum(C[n + 1:])
-    return dC
-def neq2_isodesic_rhs(t, C, p, backend=np):
-    kp = p[0]
-    kn = p[1]
-    ka = p[2]
-    kd1 = p[3]
-    kd2 = p[4]
-    kd3 = p[5]
-
-    d = C[0]
-
-    dC = np.zeros_like(C) * C  ## HACK
-
-    idx = np.arange(jmax + 1)
-
-    dC[0] = - ka*d + kd1*C[1] + 2*kd2*sum(C[2:]) + kd3*sum(idx[1:-2]*C[3:])
-    dC[1] = -2*kp*C[1]*sum(C[1:]) + 2*kn*sum(C[2:]) - kd1*C[1] + 2*kd2*C[2] + 2*kd3*sum(C[3:]) + ka*d
-    for n in range(2, jmax):
-        dC[n] =  -2*kp*C[n]*sum (C[1:]) + kp*sum(C[1:n]*(C[1:n][::-1]))  - kn * (n-1) * C[n]  + 2*kn*sum(C[n+1:]) \
-                 - 2*kd2*(C[n]-C[n+1])  - kd3*(n-2)*C[n] + 2*kd3*sum(C[n+2:]) #using that sum of empty slices is 0
-    n = jmax
-    dC[n] =  -2*kp*C[n]*sum (C[1:]) + kp*sum(C[1:n]*(C[1:n][::-1]))  - kn * (n-1) * C[n]  + 2*kn*sum(C[n+1:]) \
-             - 2*kd2*(C[n]-0)  - kd3*(n-2)*C[n] + 2*kd3*sum(C[n+2:])
-
-    return dC
-def eq_coop_rhs(t, C, p, backend=np):
-
-    nc = 4# p[0]
-    ec = p[1]
-    e = p[2]
-    kp = p[3]
-
-
-
-    dC = np.zeros_like(C) * C  
-    u0 = np.zeros(jmax**2) *e
-
-    #u0[:nc] = np.arange(nc) * ec  # <= nc, e.g. if nc = 2, this will get points 0 and 1, aka 1 and 2. arnage for nc-1
-    #u0[nc:] = np.arange(1, jmax ** 2 + 1 - nc) * e + (
-    #            nc - 1) * ec  # for n = 3 at nc=2, this will give a value of 1, with a maximum value of jmax-nc
-
-    for n in range(jmax**2):
-        if n < nc:#<= nc, e.g. if nc = 2, this will get points 0 and 1, aka 1 and 2. arnage for nc-1
-            u0[n] = n*ec
-        else:
-            u0[n] = n * e + (
-                        nc - 1) * ec  # for n = 3 at nc=2, this will give a value of 1, with a maximum value of jmax-nc
-
-
-    kn = np.zeros((jmax, jmax))*e
-    idx = np.arange(jmax) #j, but stritctly for indexing! since it's offset by 1.
-
-    for i in range(jmax):
-        for j in range(jmax):
-            kn[i, j] = kp * backend.exp(u0[i + j] - u0[i] - u0[j])
-    for n in range(jmax):
-        dC[n] = -2*kp*C[n]*sum(C) + kp*sum(C[:n] * (C[:n][::-1])) - C[n]*sum(kn[idx[:n][::-1],idx[:n]]) + 2*sum(kn[n,0:-1-n]*C[n+1:])
-    return dC
 def neq_coop_rhs(t,C,p,backend=np):
     """
     :param t:
@@ -282,100 +170,7 @@ def neq_coop_rhs(t,C,p,backend=np):
 
     return dC
 
-def neq_coop_rhs_noleak(t,C,p,backend=np):
-    """
-    :param t:
-    :param C:
-    :param p: nc, ec,ka,kd1,kd2,kd3,[e,kp] #scaled
-    :param backend:
-    :return:
-    """
-    # Scaled by k+ -> 1 and epsilon -> 0
-    kp = p[7]
-    e = p[6]
-    ec = p[1]
-    nc = 2 # p[0]
-    ka = p[2]
-    kd1 = p[3]
-    kd2 = p[4]
-    kd3 = p[5]
-
-    dC = np.zeros_like(C) * C  ## HACK
-    idx = np.arange(jmax + 1) #len of monomer
-    kn = np.zeros((jmax,jmax)) * ec #HACK to make symbolic
-    for i in range(jmax):
-        for j in range(jmax):
-           kn[i,j] = kp*backend.exp(e + ( ec - e) * kn_prefix[nc//1 - 1,i,j])
-
-    d = C[0]
-
-
-    dC[0] = - ka*d + kd1*C[1] + 2*kd2*sum(C[2:]) + kd3*sum(idx[1:-2]*C[3:])
-    dC[1] = -2*kp*C[1]*sum(C[1:]) + 2*sum(kn[0,:-1] * C[2:]) - kd1*C[1] + 2*kd2*C[2] + 2*kd3*sum(C[3:]) + ka*d
-    for n in range(2, jmax):
-        dC[n] =  -2*kp*C[n]*sum (C[1:]) + kp*sum(C[1:n]*(C[1:n][::-1]))  - sum(kn[np.arange(n-1-1,-1,-1),np.arange(1-1,n-1)] ) * C[n]  + 2*sum(kn[:jmax-n,n-1]*C[n+1:]) \
-                 - 2*kd2*(C[n]-C[n+1])  - kd3*(n-2)*C[n] + 2*kd3*sum(C[n+2:]) #using that sum of empty slices is 0
-    n = jmax
-    dC[n] =      -2*kp*C[n]*sum (C[1:]) + kp*sum(C[1:n]*(C[1:n][::-1]))      - sum(kn[np.arange(n-1-1,-1,-1),np.arange(1-1,n-1)] ) * C[n]  + 2*sum(kn[:jmax-n,n-1]*C[n+1:])  \
-             - 2*kd2*(C[n]-0)  - kd3*(n-2)*C[n] + 2*kd3*sum(C[n+2:])
-
-    return dC
-
-
-def hermans_rhs(t,C,p,backend=np):
-    k_frag, k_nuc, k_red, k_ox = p
-    JMAX = jmax  # int(jmax)
-    nc = 2
-
-    dC = np.zeros_like(C)*C ## HACK
-
-
-    ## This will allow the expression below to work as intended
-
-    m = C[-2]
-    r = C[-1]
-
-    ## Build some prefix sums
-    ## https://stackoverflow.com/questions/16541618/perform-a-reverse-cumulative-sum-on-a-numpy-array
-    sC = np.cumsum(C[:-2][::-1])[::-1]  ##we do a lot of sums for N to inf of the array
-
-    S1 = 0.
-    S2 = 0.
-    S3 = 0.
-
-    for j in range(nc, JMAX + 1):
-        dC[j] = 2 * m * (C[j - 1] - C[j]) + 2 * k_red * (C[j + 1] - C[j]) - k_frag * ((j - 1) * C[j] - 2 * sC[j + 1])
-
-        S1 += j * (C[j - 1] - C[j])
-        S2 += j * ((j - 1) * C[j] - 2 * sC[j + 1])
-        S3 += j * (C[j + 1] - C[j])
-
-    dC[nc] += k_nuc * m ** nc  ## Nucleation
-
-    dC[-2] = k_ox * r - nc * k_nuc * (m ** nc) - 2 * m * S1 + k_frag * S2  # m
-    dC[-1] = -k_ox * r - 2 * k_red * S3  # r
-
-    return dC
-
-
-
-
-
-
-
-def load_systems():
-    eq_isodesic = None #base_integration_wrapper("eq_isodesic")
-    neq_isodesic = None #base_integration_wrapper("neq_isodesic")
-    neq2_isodesic = None #base_integration_wrapper("neq2_isodesic")
-    eq_coop = None #base_integration_wrapper("eq_coop")
-    neq_coop = None #base_integration_wrapper("neq_coop")
-    neq_coop_tr = base_integration_wrapper("neq_coop_tr")
-
-    return eq_isodesic,neq_isodesic,neq2_isodesic,eq_coop,neq_coop,neq_coop_tr
-
-
-
-
+#fueled version of the model
 def neq_coop_rhs_transient(t,C,p,backend=np):
     """
     :param t:
@@ -418,6 +213,15 @@ def neq_coop_rhs_transient(t,C,p,backend=np):
 
     return dC
 
+def load_systems():
+    eq_isodesic = None #base_integration_wrapper("eq_isodesic")
+    neq_isodesic = None #base_integration_wrapper("neq_isodesic")
+    neq2_isodesic = None #base_integration_wrapper("neq2_isodesic")
+    eq_coop = None #base_integration_wrapper("eq_coop")
+    neq_coop = base_integration_wrapper("neq_coop")
+    neq_coop_tr = base_integration_wrapper("neq_coop_tr")
+
+    return eq_isodesic,neq_isodesic,neq2_isodesic,eq_coop,neq_coop,neq_coop_tr
 
 
 def load_optim(name):
@@ -556,8 +360,6 @@ def plot_pairwise_ccf(*args, **kwargs):
     # ax.cla()
 
 
-import glob
-import matplotlib.gridspec as gs
 
 colors = np.array([[0, 99, 230],
                    [169, 213, 58],
@@ -567,10 +369,11 @@ colors = np.array([[0, 99, 230],
                    [158, 34, 31],
                    [1, 156, 157],
                    [255, 168, 213]]) / 255.
-from scipy.spatial import Delaunay
-import numpy as np
 
 
+
+#https://stackoverflow.com/questions/23073170/calculate-bounding-polygon-of-alpha-shape-from-the-delaunay-triangulation 
+#A good heuristic algorithm to measure size of phase space. 
 def alpha_shape(points, alpha, only_outer=True):
     """
     Compute the alpha shape (concave hull) of a set of points.
@@ -657,7 +460,6 @@ def PolyArea(x, y):
     return 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
 
 
-import h5py
 
 def get_status(X):
 
@@ -813,6 +615,8 @@ get_integrated_res([0.,0.,0.,0,0,0.])
 """
 pool=mp.Pool()
 
+
+##original boundaries 
 #design_ranges=np.array([[0,4],[20,32],
 #                        [-2,0.5],[-32,0],
 #                        [-32,5],[-1,3]])
@@ -828,9 +632,8 @@ npoints = 1001
 nbatches=5000
 exp_list=sampling(num)
 
-import time
 startt=time.perf_counter()
-with h5py.File("noneq_coop_lhs_nc2_v2wm0_partialres_{}_5e6_zoom.hdf5".format(num),"w") as of:
+with h5py.File("noneq_coop_lhs_nc2_v2wm0_{}_5e6_zoom.hdf5".format(num),"w") as of:
     for batch in range(nbatches):
         batch_size=num//nbatches
         batchres=[]
@@ -879,37 +682,4 @@ with h5py.File("noneq_coop_lhs_nc2_v2wm0_partialres_{}_5e6_zoom.hdf5".format(num
 print("##############")
 print(time.perf_counter()-startt)
 res=pool.map(get_status,exp_list)
-
-"""
-#np.savetxt("results/noneq_coop_lhs_nc2_v2wm0_fullmetric_{}_res.txt".format(num),res)
-#np.savetxt("results/noneq_coop_lhs_nc2_v2wm0_fullmetric_{}_pts.txt".format(num),exp_list)
-#print(res[np.argmin(res)],exp_list[np.argmin(res)])
-
-#"""
-"""
-bb.search_min(get_status,[[0,6],[0,32],
-                        [-32,32],[-32,32],
-                        [-32,32],[-32,32]],10000,16,"results/noneq_coop_bb_nc2_v2wm0_10000.csv")
-#"""
-"""
-design_ranges=np.array([[0,4],[0,32],
-                        [-32,5],[-32,32],
-                        [-32,32],[-32,32]])
-
-def __optim_pso(opt_f, design_ranges):
-    from pyswarm import pso
-    bounds = np.array(design_ranges)
-
-    lb = [x[0] for x in bounds]
-    ub = [x[1] for x in bounds]
-    xopt, fopt, all_pos, all_obj = pso(opt_f, lb, ub, maxiter=100,swarmsize=1000,
-                                       minstep=np.nan, minfunc=np.nan, detail=True)
-    return xopt, all_pos, all_obj
-
-num=1000
-xopt, all_pos, all_obj = __optim_pso(get_status,design_ranges)
-print(xopt)
-np.savetxt("results/noneq_coop_pso_nc2_v2wm0_fullmetric_long_{}_res.txt".format(num),all_obj)
-np.savetxt("results/noneq_coop_pso_nc2_v2wm0_fullmetric_long_{}_pts.txt".format(num),np.vstack(all_pos))
-#"""
 
