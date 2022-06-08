@@ -1,5 +1,6 @@
 # ChemRevOscillator
-## Code accompanying []
+## Code accompanying Insights into Chemically Fueled Supramolecular Polymers
+## https://doi.org/10.1021/acs.chemrev.1c00958
 
 This repository contains both code necessary to reproduce the data presented in the manuscript, as well as an interactive viewer for any curious reader to immediately explore the system. 
 
